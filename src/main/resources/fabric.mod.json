@@ -3,7 +3,7 @@
   "id": "craft_calculator",
   "version": "${version}",
   "name": "CraftCalculator",
-  "description": "Calculates required crafting ingredients for an item and amount",
+  "description": "Calculates required crafting ingredients for an item and amount.",
   "authors": [
     "ArrozNaTwitch"
   ],
