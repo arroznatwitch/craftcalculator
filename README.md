@@ -7,3 +7,6 @@ The mod will display all required crafting materials.
 
 Supports Portuguese (PT) and Portuguese (BR). Just change your game language.
 
+# How To Build 
+Working on this!
+
