@@ -1,5 +1,5 @@
 <p align="left">
-  <img src="https://raw.githubusercontent.com/arroznatwitch/CraftCalculator/master/src/main/resources/assets/craft_calculator_icon/icon.png" width="64" alt="CraftCalculator icon">
+  <img src="https://raw.githubusercontent.com/arroznatwitch/CraftCalculator/master/src/main/resources/assets/craft_calculator_icon/icon.png" width="120" alt="CraftCalculator icon">
 </p>
 
 # CraftCalculator
