@@ -1,21 +1,19 @@
 package com.craftcalculator;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.item.Item;
-import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.item.crafting.CraftingRecipe;
-import net.minecraft.world.item.crafting.Ingredient;
-import net.minecraft.world.item.crafting.RecipeHolder;
-import net.minecraft.world.item.crafting.RecipeManager;
-import net.minecraft.world.item.crafting.display.RecipeDisplay;
-import net.minecraft.util.context.ContextMap;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -23,9 +21,14 @@ import java.util.Set;
 /**
  * Core recipe calculation logic.
  *
- * Given a target item and quantity, produces two maps:
- *   - rawMaterials: items that cannot (or should not) be crafted further
- *   - craftItems:   craftable sub-items shown as-is (e.g. "Bow" for a Dispenser)
+ * Recipes are loaded from a bundled JSON index (generated from the vanilla
+ * crafting recipes) instead of the live server RecipeManager. This is what
+ * makes the mod work identically in singleplayer AND multiplayer: since the
+ * 1.21.2 recipe rework the client no longer receives the full crafting recipe
+ * list, so we ship our own copy.
+ *
+ * Bundled file: assets/craft_calculator/recipes.json
+ * Format: [ { "r": "<result id>", "c": <count>, "i": [ ["<opt>", ...], ... ] }, ... ]
  */
 public final class RecipeCalculator {
 
@@ -35,41 +38,72 @@ public final class RecipeCalculator {
         public final Map<String, Long> rawMaterials = new HashMap<>();
     }
 
-    // Cached reflection lookups for SlotDisplay.resolveForStacks, keyed by display class.
-    private static final Map<Class<?>, Method> RESOLVE_STACKS_CACHE = new HashMap<>();
+    /** Lightweight bundled recipe: how many the recipe yields, plus one entry per ingredient slot. */
+    public record BundledRecipe(int count, List<List<Item>> slots) {}
+
+    private static final String RESOURCE_PATH = "/assets/craft_calculator/recipes.json";
+
+    // Lazily-loaded index of Item -> recipe that produces it (built once, cached).
+    private static volatile Map<Item, BundledRecipe> CACHED_INDEX = null;
 
     // ─── Public API ───────────────────────────────────────────────────────────────
 
     /**
-     * Builds a recipe index from the RecipeManager (O(n) scan, done once per command).
-     * Returns a map of Item → first CraftingRecipe that produces it.
+     * Returns the recipe index (Item -> first crafting recipe that produces it),
+     * loading and parsing the bundled JSON on first use.
      */
-    public static Map<Item, CraftingRecipe> buildRecipeIndex(RecipeManager rm) {
-        Map<Item, CraftingRecipe> index = new HashMap<>();
-        for (RecipeHolder<?> h : rm.getRecipes()) {
-            if (!(h.value() instanceof CraftingRecipe cr)) continue;
-            ItemStack out = getOutputStack(cr);
-            if (!out.isEmpty()) {
-                index.putIfAbsent(out.getItem(), cr);
+    public static Map<Item, BundledRecipe> buildRecipeIndex() {
+        Map<Item, BundledRecipe> idx = CACHED_INDEX;
+        if (idx != null) return idx;
+        synchronized (RecipeCalculator.class) {
+            if (CACHED_INDEX != null) return CACHED_INDEX;
+            CACHED_INDEX = loadFromResource();
+            return CACHED_INDEX;
+        }
+    }
+
+    private static Map<Item, BundledRecipe> loadFromResource() {
+        Map<Item, BundledRecipe> index = new HashMap<>();
+        try (InputStream in = RecipeCalculator.class.getResourceAsStream(RESOURCE_PATH)) {
+            if (in == null) {
+                System.err.println("[CraftCalculator] Bundled recipe index not found: " + RESOURCE_PATH);
+                return index;
             }
+            JsonArray arr = JsonParser.parseReader(
+                    new InputStreamReader(in, StandardCharsets.UTF_8)).getAsJsonArray();
+
+            for (JsonElement el : arr) {
+                JsonObject o = el.getAsJsonObject();
+                Item result = resolveItem(o.get("r").getAsString());
+                if (result == null) continue;
+
+                int count = o.has("c") ? o.get("c").getAsInt() : 1;
+
+                List<List<Item>> slots = new ArrayList<>();
+                for (JsonElement slotEl : o.getAsJsonArray("i")) {
+                    List<Item> options = new ArrayList<>();
+                    for (JsonElement optEl : slotEl.getAsJsonArray()) {
+                        Item it = resolveItem(optEl.getAsString());
+                        if (it != null) options.add(it);
+                    }
+                    if (!options.isEmpty()) slots.add(options);
+                }
+                if (slots.isEmpty()) continue;
+
+                index.putIfAbsent(result, new BundledRecipe(Math.max(1, count), slots));
+            }
+        } catch (Exception e) {
+            System.err.println("[CraftCalculator] Failed to load bundled recipes: " + e);
         }
         return index;
     }
 
     /**
      * Recursively collects raw materials and craftable sub-items for {@code targetKey}.
-     *
-     * @param targetKey  Registry key of the item to calculate (e.g. "minecraft:dispenser")
-     * @param need       How many of this item are needed
-     * @param index      Recipe index built by {@link #buildRecipeIndex}
-     * @param out        Accumulator for results
-     * @param guard      Cycle-detection set (pass a new empty HashSet from the call site)
-     * @param isRoot     True only for the top-level item — prevents it appearing as its own ingredient
-     * @return true if a recipe was found for this item, false otherwise
      */
     public static boolean collectRequirements(
             String targetKey, long need,
-            Map<Item, CraftingRecipe> index, Requirements out,
+            Map<Item, BundledRecipe> index, Requirements out,
             Set<String> guard, boolean isRoot) {
 
         if (WoodGroups.isSentinel(targetKey)) {
@@ -88,7 +122,7 @@ public final class RecipeCalculator {
             return true;
         }
 
-        CraftingRecipe recipe = index.get(item);
+        BundledRecipe recipe = index.get(item);
         if (recipe == null) {
             out.rawMaterials.merge(targetKey, need, Long::sum);
             return false;
@@ -102,16 +136,10 @@ public final class RecipeCalculator {
 
         if (!guard.add(targetKey)) return true; // cycle guard
 
-        ItemStack output   = getOutputStack(recipe);
-        int       produced = Math.max(1, output.getCount());
-        long      crafts   = (long) Math.ceil((double) need / produced);
+        int  produced = Math.max(1, recipe.count());
+        long crafts   = (long) Math.ceil((double) need / produced);
 
-        for (Ingredient ingredient : recipe.placementInfo().ingredients()) {
-            if (ingredient.isEmpty()) continue;
-            List<Item> options = ingredient.items()
-                    .map(h -> h.value())
-                    .filter(i -> i != Items.AIR)
-                    .toList();
+        for (List<Item> options : recipe.slots()) {
             if (options.isEmpty()) continue;
 
             if (options.size() > 1) {
@@ -128,57 +156,6 @@ public final class RecipeCalculator {
 
         guard.remove(targetKey);
         return true;
-    }
-
-    // ─── Recipe / ItemStack utilities ─────────────────────────────────────────────
-
-    public static ItemStack getOutputStack(CraftingRecipe recipe) {
-        for (RecipeDisplay display : recipe.display()) {
-            try {
-                List<ItemStack> stacks = resolveStacks(display.result());
-                if (!stacks.isEmpty()) {
-                    ItemStack s = stacks.get(0);
-                    if (s != null && !s.isEmpty()) return s;
-                }
-            } catch (Exception ignored) {}
-        }
-        return ItemStack.EMPTY;
-    }
-
-    /**
-     * Resolves the ItemStack list from a SlotDisplay via reflection.
-     * The Method handle is cached per display class to avoid repeated lookups.
-     */
-    @SuppressWarnings("unchecked")
-    private static List<ItemStack> resolveStacks(Object slotDisplay) {
-        Class<?> cls = slotDisplay.getClass();
-
-        Method m = RESOLVE_STACKS_CACHE.computeIfAbsent(cls, c -> {
-            try { return c.getMethod("resolveForStacks"); }
-            catch (NoSuchMethodException ignored) {}
-            try { return c.getMethod("resolveForStacks", ContextMap.class); }
-            catch (NoSuchMethodException ignored) {}
-            return null;
-        });
-
-        if (m == null) return List.of();
-
-        try {
-            Object result = m.getParameterCount() == 0
-                    ? m.invoke(slotDisplay)
-                    : m.invoke(slotDisplay, getEmptyContextMap());
-            if (result instanceof List<?> l) return (List<ItemStack>) l;
-        } catch (ReflectiveOperationException ignored) {}
-
-        return List.of();
-    }
-
-    private static ContextMap getEmptyContextMap() {
-        try {
-            Object v = ContextMap.class.getField("EMPTY").get(null);
-            if (v instanceof ContextMap m) return m;
-        } catch (ReflectiveOperationException ignored) {}
-        return null;
     }
 
     // ─── Item key / resolve helpers ───────────────────────────────────────────────

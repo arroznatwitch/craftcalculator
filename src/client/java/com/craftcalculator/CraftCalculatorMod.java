@@ -14,8 +14,6 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.item.crafting.CraftingRecipe;
-import net.minecraft.world.item.crafting.RecipeManager;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -24,6 +22,10 @@ import java.util.Map;
 /**
  * Entry point for the CraftCalculator mod.
  * Command syntax: /cc <item> <amount>
+ *
+ * Recipes come from a bundled index (see RecipeCalculator), so the command
+ * works in both singleplayer and multiplayer — no dependency on the server's
+ * RecipeManager, which the client never receives in multiplayer.
  */
 public final class CraftCalculatorMod implements ClientModInitializer {
 
@@ -31,8 +33,6 @@ public final class CraftCalculatorMod implements ClientModInitializer {
 
     private static final SimpleCommandExceptionType ERR_INVALID_ITEM = new SimpleCommandExceptionType(
             Component.translatable(MODID + ".error.invalid_item"));
-    private static final SimpleCommandExceptionType ERR_SINGLEPLAYER = new SimpleCommandExceptionType(
-            Component.translatable(MODID + ".error.singleplayer_only"));
     private static final SimpleCommandExceptionType ERR_NO_WORLD = new SimpleCommandExceptionType(
             Component.translatable(MODID + ".error.no_world"));
 
@@ -57,8 +57,6 @@ public final class CraftCalculatorMod implements ClientModInitializer {
 
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null || mc.player == null) throw ERR_NO_WORLD.create();
-        if (!mc.isLocalServer())                    throw ERR_SINGLEPLAYER.create();
-        if (mc.getSingleplayerServer() == null)     throw ERR_SINGLEPLAYER.create();
 
         String itemStr = ItemArgumentType.getItem(ctx, "item").trim();
         int    amount  = IntegerArgumentType.getInteger(ctx, "amount");
@@ -70,8 +68,7 @@ public final class CraftCalculatorMod implements ClientModInitializer {
         Item item = BuiltInRegistries.ITEM.getValue(id);
         if (item == null || item == Items.AIR) throw ERR_INVALID_ITEM.create();
 
-        RecipeManager rm = mc.getSingleplayerServer().getRecipeManager();
-        Map<Item, CraftingRecipe> recipeIndex = RecipeCalculator.buildRecipeIndex(rm);
+        Map<Item, RecipeCalculator.BundledRecipe> recipeIndex = RecipeCalculator.buildRecipeIndex();
 
         RecipeCalculator.Requirements req = new RecipeCalculator.Requirements();
         boolean hadRecipe = RecipeCalculator.collectRequirements(
